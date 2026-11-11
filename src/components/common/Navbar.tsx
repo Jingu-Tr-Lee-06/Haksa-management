@@ -44,6 +44,7 @@ export default function Navbar() {
     { href: '/curriculum', label: '성적 등록' },
     { href: '/simulator', label: '수강 시뮬레이터' },
     { href: '/regulations', label: '학사 규정 Q&A' },
+    { href: '/profile', label: '계정 관리' },
   ];
 
   return (

@@ -1,9 +1,10 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import React, { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { MajorTrack } from '@/types/curriculum';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -13,296 +14,339 @@ export default function RegisterPage() {
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
   const [name, setName] = useState('');
-  const [studentNumber, setStudentNumber] = useState('');
-  const [admissionYear, setAdmissionYear] = useState('');
-  const [primaryMajor, setPrimaryMajor] = useState('');
-  const [track, setTrack] = useState<'SINGLE_MAJOR' | 'DOUBLE_MAJOR' | 'MINOR' | ''>('');
-  const [doubleMajor, setDoubleMajor] = useState('');
-  const [minorMajor, setMinorMajor] = useState('');
+  const [studentId, setStudentId] = useState('');
+  const [admissionYear, setAdmissionYear] = useState('2025');
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isSuccess, setIsSuccess] = useState(false);
+  // 전공 트랙 상태 관리
+  const [majorTrack, setMajorTrack] = useState<MajorTrack>('SINGLE');
+  const [secondaryMajorName, setSecondaryMajorName] = useState('');
+
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [isConfirmationSent, setIsConfirmationSent] = useState(false);
+
+  const isPasswordMismatch = password.length > 0 && passwordConfirm.length > 0 && password !== passwordConfirm;
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
+    setLoading(true);
+    setErrorMessage('');
 
     if (password !== passwordConfirm) {
-      setErrorMessage('비밀번호와 비밀번호 확인이 일치하지 않는다.');
+      setErrorMessage('비밀번호와 비밀번호 확인이 일치하지 않습니다.');
+      setLoading(false);
       return;
     }
 
-    if (!track) {
-      setErrorMessage('이수 트랙(단일전공, 복수전공, 부전공)을 선택해야 한다.');
+    if (majorTrack !== 'SINGLE' && !secondaryMajorName.trim()) {
+      setErrorMessage(
+        majorTrack === 'DOUBLE'
+          ? '복수전공 학과명을 입력해 주십시오.'
+          : '부전공 학과명을 입력해 주십시오.'
+      );
+      setLoading(false);
       return;
     }
-
-    if (!admissionYear || isNaN(Number(admissionYear))) {
-      setErrorMessage('입학년도를 숫자로 올바르게 입력해야 한다.');
-      return;
-    }
-
-    setIsLoading(true);
 
     try {
-      const redirectUrl =
-        typeof window !== 'undefined'
-          ? `${window.location.origin}/auth/callback`
-          : 'http://localhost:3000/auth/callback';
+      const dbTrackEnum =
+        majorTrack === 'DOUBLE'
+          ? 'DOUBLE_MAJOR'
+          : majorTrack === 'MINOR'
+          ? 'MINOR'
+          : 'SINGLE_MAJOR';
 
-      const { data: authData, error: authError } = await supabase.auth.signUp({
+      const secMajor = majorTrack === 'SINGLE' ? null : secondaryMajorName.trim();
+
+      const { data, error } = await supabase.auth.signUp({
         email: email.trim(),
         password,
         options: {
-          emailRedirectTo: redirectUrl,
           data: {
+            full_name: name.trim(),
             name: name.trim(),
-            student_number: studentNumber.trim(),
-            admission_year: Number(admissionYear),
-            primary_major: primaryMajor.trim(),
-            track: track === 'MINOR' ? 'SINGLE_MAJOR' : track,
-            double_major: track === 'DOUBLE_MAJOR' ? doubleMajor.trim() : null,
-            minor_major: track === 'MINOR' ? minorMajor.trim() : null,
+            student_id: studentId.trim(),
+            student_number: studentId.trim(),
+            admission_year: parseInt(admissionYear, 10),
+            primary_major: '컴퓨터교육과',
+            track: dbTrackEnum,
+            major_track: majorTrack,
+            secondary_major: secMajor,
+            double_major: majorTrack === 'DOUBLE' ? secMajor : null,
+            minor_major: majorTrack === 'MINOR' ? secMajor : null,
           },
         },
       });
 
-      if (authError) throw authError;
-
-      // Email Confirm이 비활성화되어 즉시 세션이 발급된 경우 직접 프로필 적재
-      if (authData.session && authData.user) {
-        await (supabase.from('profiles') as any).upsert({
-          id: authData.user.id,
-          student_number: studentNumber.trim(),
-          name: name.trim(),
-          primary_major: primaryMajor.trim(),
-          track: track === 'MINOR' ? 'SINGLE_MAJOR' : track,
-          double_major: track === 'DOUBLE_MAJOR' ? doubleMajor.trim() : null,
-          minor_major: track === 'MINOR' ? minorMajor.trim() : null,
-          admission_year: Number(admissionYear),
-        });
-
-        await (supabase.from('user_non_subject_records') as any).upsert({
-          user_id: authData.user.id,
-          gender_equity_education_count: 0,
-          teaching_aptitude_test_count: 0,
-          cpr_training_count: 0,
-          volunteer_hours: 0,
-          narcotics_test_submitted: false,
-          korean_history_certified: false,
-        });
-
-        router.push('/');
-        router.refresh();
-        return;
+      if (error) {
+        throw error;
       }
 
-      setIsSuccess(true);
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : '학생 등록 중 오류가 발생하였다.'
-      );
+      if (data?.user) {
+        const profilePayload = {
+          id: data.user.id,
+          name: name.trim(),
+          full_name: name.trim(),
+          student_number: studentId.trim(),
+          student_id: studentId.trim(),
+          admission_year: parseInt(admissionYear, 10),
+          primary_major: '컴퓨터교육과',
+          track: dbTrackEnum,
+          major_track: majorTrack,
+          secondary_major: secMajor,
+          double_major: majorTrack === 'DOUBLE' ? secMajor : null,
+          minor_major: majorTrack === 'MINOR' ? secMajor : null,
+          updated_at: new Date().toISOString(),
+        };
+
+        const { error: profileError } = await (supabase.from('profiles') as any).upsert(
+          profilePayload,
+          { onConflict: 'id' }
+        );
+
+        if (profileError) {
+          console.warn('Profile sync note:', profileError.message || profileError);
+        }
+
+        if (!data.session) {
+          setIsConfirmationSent(true);
+        } else {
+          // 가입 성공 즉시 메인 랜딩페이지로 이동
+          router.push('/');
+          router.refresh();
+        }
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage('회원가입 처리 중 오류가 발생했습니다.');
+      }
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
-  if (isSuccess) {
-    return (
-      <div className="flex min-h-[calc(100vh-140px)] items-center justify-center px-4 py-12">
-        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 font-bold">
-            ✓
-          </div>
-          <h2 className="mt-4 text-xl font-bold text-slate-900">인증 메일 발송 완료</h2>
-          <p className="mt-2 text-xs leading-relaxed text-slate-600">
-            <strong className="text-slate-800">{email}</strong> 계정으로 인증 이메일을 발송하였다.<br />
-            메일함에서 안내 링크를 확인한 뒤 로그인해야 한다.
-          </p>
-          <div className="mt-6">
-            <Link
-              href="/"
-              className="inline-block w-full rounded-lg bg-slate-900 py-3 text-xs font-bold text-white transition hover:bg-slate-800"
-            >
-              메인 화면으로 이동
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex min-h-[calc(100vh-140px)] items-center justify-center px-4 py-12">
-      <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-        <div className="mb-6 text-center">
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            신규 회원가입
-          </h1>
-          <p className="mt-1 text-xs text-slate-500">
-            학사 졸업 사정을 위한 소속 학과 및 트랙 정보를 입력해야 한다.
+    <div className="min-h-screen bg-gray-50 flex flex-col justify-between text-gray-900">
+      <div className="flex-1 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+        <div className="sm:mx-auto sm:w-full sm:max-w-md">
+          <h2 className="text-center text-2xl font-bold tracking-tight text-gray-900">
+            국립공주대학교 학사 관리 시스템
+          </h2>
+          <p className="mt-2 text-center text-sm text-gray-600">
+            사범대학 컴퓨터교육과 학생 맞춤형 졸업 사정 등록
           </p>
         </div>
 
-        {errorMessage && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-            {errorMessage}
+        <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
+          <div className="bg-white py-8 px-6 shadow-sm border border-gray-200 rounded-lg sm:px-10">
+            {isConfirmationSent ? (
+              <div className="text-center space-y-4">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-blue-50 border border-blue-200">
+                  <span className="text-blue-600 font-bold text-sm">MAIL</span>
+                </div>
+                <h3 className="text-base font-bold text-gray-900">
+                  인증 메일이 발송되었습니다
+                </h3>
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  <strong className="text-gray-900">{email}</strong> 주소로 인증 링크를 전송했습니다.<br />
+                  수신함(또는 스팸메일함)을 확인하여 링크를 클릭하시면 회원가입이 완료됩니다.
+                </p>
+                <div className="pt-4 border-t border-gray-100">
+                  <Link
+                    href="/"
+                    className="inline-block w-full rounded-md bg-gray-900 py-2.5 px-4 text-xs font-semibold text-white shadow-sm hover:bg-gray-800 transition"
+                  >
+                    홈으로 이동
+                  </Link>
+                </div>
+              </div>
+            ) : (
+              <>
+                {errorMessage && (
+                  <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded">
+                    {errorMessage}
+                  </div>
+                )}
+
+                <form className="space-y-4" onSubmit={handleRegister}>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">이메일</label>
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="example@smail.kongju.ac.kr"
+                      className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">비밀번호</label>
+                    <input
+                      type="password"
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="8자 이상 입력"
+                      className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">비밀번호 확인</label>
+                    <input
+                      type="password"
+                      required
+                      value={passwordConfirm}
+                      onChange={(e) => setPasswordConfirm(e.target.value)}
+                      placeholder="비밀번호 재입력"
+                      className={`mt-1 block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1 ${
+                        isPasswordMismatch
+                          ? 'border-red-400 focus:border-red-500 focus:ring-red-500'
+                          : 'border-gray-300 focus:border-gray-900 focus:ring-gray-900'
+                      }`}
+                    />
+                    {isPasswordMismatch && (
+                      <p className="mt-1 text-xs text-red-600">
+                        비밀번호가 일치하지 않습니다.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">이름</label>
+                      <input
+                        type="text"
+                        required
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="홍길동"
+                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">학번</label>
+                      <input
+                        type="text"
+                        required
+                        value={studentId}
+                        onChange={(e) => setStudentId(e.target.value)}
+                        placeholder="202500000"
+                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">입학년도</label>
+                      <input
+                        type="number"
+                        required
+                        value={admissionYear}
+                        onChange={(e) => setAdmissionYear(e.target.value)}
+                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">주전공</label>
+                      <input
+                        type="text"
+                        disabled
+                        value="컴퓨터교육과"
+                        className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-600 shadow-sm cursor-not-allowed"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      이수 트랙 구분
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMajorTrack('SINGLE');
+                          setSecondaryMajorName('');
+                        }}
+                        className={`py-2 text-sm font-medium rounded-md border transition-colors ${
+                          majorTrack === 'SINGLE'
+                            ? 'bg-gray-900 text-white border-gray-900'
+                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        단일전공
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMajorTrack('DOUBLE')}
+                        className={`py-2 text-sm font-medium rounded-md border transition-colors ${
+                          majorTrack === 'DOUBLE'
+                            ? 'bg-gray-900 text-white border-gray-900'
+                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        복수전공
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMajorTrack('MINOR')}
+                        className={`py-2 text-sm font-medium rounded-md border transition-colors ${
+                          majorTrack === 'MINOR'
+                            ? 'bg-gray-900 text-white border-gray-900'
+                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        부전공
+                      </button>
+                    </div>
+                  </div>
+
+                  {majorTrack !== 'SINGLE' && (
+                    <div className="pt-2 transition-all">
+                      <label className="block text-sm font-medium text-gray-700">
+                        {majorTrack === 'DOUBLE' ? '복수전공 학과명' : '부전공 학과명'}
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={secondaryMajorName}
+                        onChange={(e) => setSecondaryMajorName(e.target.value)}
+                        placeholder="예: 기술·가정교육과, 수학교육과"
+                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                      />
+                    </div>
+                  )}
+
+                  <div className="pt-2">
+                    <button
+                      type="submit"
+                      disabled={loading || isPasswordMismatch}
+                      className="w-full rounded-md bg-gray-900 py-2.5 px-4 text-sm font-medium text-white shadow-sm hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2 disabled:bg-gray-400 transition-colors"
+                    >
+                      {loading ? '등록 처리 중...' : '회원가입 및 학사 설정 완료'}
+                    </button>
+                  </div>
+                </form>
+
+                <div className="mt-6 text-center text-sm">
+                  <span className="text-gray-500">이미 계정이 있으신가요? </span>
+                  <Link href="/" className="font-medium text-gray-900 underline">
+                    로그인
+                  </Link>
+                </div>
+              </>
+            )}
           </div>
-        )}
-
-        <form onSubmit={handleRegister} className="space-y-4 text-xs">
-          <div>
-            <label className="block font-semibold text-slate-700">이메일 (아이디)</label>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="example@smail.kongju.ac.kr"
-              className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-            />
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block font-semibold text-slate-700">비밀번호</label>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="6자리 이상"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700">비밀번호 확인</label>
-              <input
-                type="password"
-                required
-                value={passwordConfirm}
-                onChange={(e) => setPasswordConfirm(e.target.value)}
-                placeholder="동일 비밀번호 재입력"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block font-semibold text-slate-700">성명</label>
-              <input
-                type="text"
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="예: 홍길동"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700">학번</label>
-              <input
-                type="text"
-                required
-                value={studentNumber}
-                onChange={(e) => setStudentNumber(e.target.value)}
-                placeholder="예: 202500000"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block font-semibold text-slate-700">입학년도</label>
-              <input
-                type="number"
-                required
-                value={admissionYear}
-                onChange={(e) => setAdmissionYear(e.target.value)}
-                placeholder="예: 2025"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700">이수 트랙</label>
-              <select
-                required
-                value={track}
-                onChange={(e) => setTrack(e.target.value as any)}
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-800 text-slate-800"
-              >
-                <option value="" disabled className="text-slate-300">
-                  트랙을 선택하십시오
-                </option>
-                <option value="SINGLE_MAJOR">단일전공 (심화 - 140학점)</option>
-                <option value="DOUBLE_MAJOR">복수전공 (144학점 이상)</option>
-                <option value="MINOR">부전공 (140학점 체계)</option>
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block font-semibold text-slate-700">주전공</label>
-            <input
-              type="text"
-              required
-              value={primaryMajor}
-              onChange={(e) => setPrimaryMajor(e.target.value)}
-              placeholder="예: 컴퓨터교육과"
-              className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-            />
-          </div>
-
-          {track === 'DOUBLE_MAJOR' && (
-            <div>
-              <label className="block font-semibold text-slate-700">복수전공 학과명</label>
-              <input
-                type="text"
-                required
-                value={doubleMajor}
-                onChange={(e) => setDoubleMajor(e.target.value)}
-                placeholder="예: 기술·가정교육과"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-          )}
-
-          {track === 'MINOR' && (
-            <div>
-              <label className="block font-semibold text-slate-700">부전공 표시과목 학과명</label>
-              <input
-                type="text"
-                required
-                value={minorMajor}
-                onChange={(e) => setMinorMajor(e.target.value)}
-                placeholder="예: 기술·가정교육과 (부전공 이수 21학점 이상)"
-                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3.5 py-2.5 outline-none transition focus:border-slate-800 placeholder:text-slate-300"
-              />
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="w-full rounded-lg bg-slate-900 py-3 font-bold text-white transition hover:bg-slate-800 disabled:bg-slate-400"
-          >
-            {isLoading ? '등록 중...' : '회원가입 완료'}
-          </button>
-        </form>
-
-        <div className="mt-6 text-center text-xs text-slate-500">
-          이미 등록된 계정이 있는가?{' '}
-          <Link
-            href="/"
-            className="font-bold text-slate-900 underline underline-offset-4 hover:text-slate-700"
-          >
-            로그인
-          </Link>
         </div>
       </div>
+
+    
     </div>
   );
 }

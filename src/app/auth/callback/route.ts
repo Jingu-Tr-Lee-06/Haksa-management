@@ -1,11 +1,17 @@
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
+// src/app/auth/callback/route.ts
 import { NextResponse } from 'next/server';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
+import { cookies } from 'next/headers';
+
+interface CookieToSet {
+  name: string;
+  value: string;
+  options: CookieOptions;
+}
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
-  const next = searchParams.get('next') ?? '/audit';
 
   if (code) {
     const cookieStore = await cookies();
@@ -17,30 +23,25 @@ export async function GET(request: Request) {
           getAll() {
             return cookieStore.getAll();
           },
-          setAll(
-            cookiesToSet: Array<{
-              name: string;
-              value: string;
-              options?: Record<string, unknown>;
-            }>
-          ) {
+          setAll(cookiesToSet: CookieToSet[]) {
             try {
-              cookiesToSet.forEach(({ name, value, options }) =>
-                cookieStore.set(name, value, options as any)
+              cookiesToSet.forEach(({ name, value, options }: CookieToSet) =>
+                cookieStore.set(name, value, options)
               );
             } catch {
-              // The `setAll` method was called from a Server Component.
+              // Server Component 환경 쿠키 쓰기 예외 방어
             }
           },
         },
       }
     );
+
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      return NextResponse.redirect(`${origin}${next}`);
+      return NextResponse.redirect(`${origin}/auth/confirmed`);
     }
   }
 
-  // 인증 실패 시 메인 페이지로 리다이렉트
-  return NextResponse.redirect(`${origin}/`);
+  // 인증 실패 시 로그인 페이지로 리다이렉트
+  return NextResponse.redirect(`${origin}/login?error=auth_failed`);
 }

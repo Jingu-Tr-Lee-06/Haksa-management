@@ -41,6 +41,41 @@ export default function EnrolledUploadModal({
     setErrorMsg(null);
 
     try {
+      // 1. 외래키(FK) 무결성 보장: profiles 테이블에 해당 유저 레코드 존재 확인 및 보정
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      const activeUserId = user?.id || userId;
+      if (!activeUserId) {
+        throw new Error('인증 세션이 유효하지 않습니다. 다시 로그인해 주십시오.');
+      }
+
+      const meta = (user?.user_metadata || {}) as Record<string, any>;
+      const rawTrack = String(meta.major_track || meta.track || 'SINGLE_MAJOR').toUpperCase();
+      const trackEnum = rawTrack.includes('DOUBLE')
+        ? 'DOUBLE_MAJOR'
+        : rawTrack.includes('MINOR')
+        ? 'MINOR'
+        : 'SINGLE_MAJOR';
+
+      // profiles 행이 없어서 생기는 FK 제약 위반(user_enrolled_courses_user_id_fkey) 사전 차단
+      await (supabase.from('profiles') as any).upsert(
+        {
+          id: activeUserId,
+          name: meta.full_name || meta.name || '학생',
+          full_name: meta.full_name || meta.name || '학생',
+          student_number: meta.student_id || meta.student_number || '',
+          primary_major: meta.primary_major || '컴퓨터교육과',
+          track: trackEnum,
+          secondary_major: meta.secondary_major || meta.double_major || null,
+          double_major: meta.secondary_major || meta.double_major || null,
+          admission_year: Number(meta.admission_year) || 2025,
+        },
+        { onConflict: 'id' }
+      );
+
+      // 2. 엑셀 파일 버퍼 파싱
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: 'array' });
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -55,22 +90,22 @@ export default function EnrolledUploadModal({
       }
 
       const headerIdx = rawRows.findIndex(
-        (row) => row.includes('과목명') || row.includes('과목코드')
+        (row) => row.some((c: any) => String(c).includes('과목명') || String(c).includes('과목코드'))
       );
 
       if (headerIdx === -1) {
-        throw new Error('국립공주대학교 수강과목조회 표준 엑셀 양식이 아닙니다.');
+        throw new Error('국립공주대학교 수강과목조회 표준 엑셀 양식이 아닙니다. (과목명 헤더 누락)');
       }
 
       const headers = rawRows[headerIdx].map((h: any) => String(h).trim());
       const colIdx = {
-        category: headers.indexOf('이수구분'),
-        code: headers.indexOf('과목코드'),
-        name: headers.indexOf('과목명'),
-        credit: headers.indexOf('학점'),
-        prof: headers.indexOf('교수명'),
-        room: headers.indexOf('강의실'),
-        time: headers.indexOf('시간표'),
+        category: headers.findIndex((h) => h.includes('이수구분') || h === '구분'),
+        code: headers.findIndex((h) => h.includes('과목코드') || h.includes('학수번호')),
+        name: headers.findIndex((h) => h.includes('과목명') || h.includes('교과목명')),
+        credit: headers.findIndex((h) => h.includes('학점')),
+        prof: headers.findIndex((h) => h.includes('교수') || h.includes('담당교수')),
+        room: headers.findIndex((h) => h.includes('강의실')),
+        time: headers.findIndex((h) => h.includes('시간표') || h.includes('시간') || h.includes('요일')),
       };
 
       if (colIdx.name === -1 || colIdx.credit === -1) {
@@ -82,7 +117,7 @@ export default function EnrolledUploadModal({
       for (let i = headerIdx + 1; i < rawRows.length; i++) {
         const row = rawRows[i];
         const courseName = String(row[colIdx.name] || '').trim();
-        if (!courseName) continue;
+        if (!courseName || courseName === '합계' || courseName === '소계') continue;
 
         const rawCat = String(row[colIdx.category] || '전선').trim();
         const credits = parseFloat(String(row[colIdx.credit] || '0').trim()) || 0;
@@ -91,7 +126,7 @@ export default function EnrolledUploadModal({
         const classroom = colIdx.room !== -1 ? String(row[colIdx.room] || '').trim() : '';
         const timetable = colIdx.time !== -1 ? String(row[colIdx.time] || '').trim() : '';
 
-        // 공주대 약어 정규화: 일교, 교실, 교소, 전필, 전선, 복필, 복선, 균선 등
+        // 공주대 약어 정규화: 일교, 교실, 교소, 전필, 전선, 복필, 복선, 부필, 부선, 균선 등
         let category = rawCat;
         if (rawCat === '일교') category = '일반교육학';
         else if (rawCat === '교실') category = '교직실습';
@@ -100,13 +135,16 @@ export default function EnrolledUploadModal({
         else if (rawCat === '전선') category = '전공선택';
         else if (rawCat === '복필') category = '복수전공필수';
         else if (rawCat === '복선') category = '복수전공선택';
+        else if (rawCat === '부필') category = '부전공필수';
+        else if (rawCat === '부선') category = '부전공선택';
         else if (rawCat === '균선') category = '균형교양선택';
 
         const isMajor =
           category.includes('전공') ||
           category.includes('전선') ||
           category.includes('전필') ||
-          category.includes('복수');
+          category.includes('복수') ||
+          category.includes('부전');
 
         const isTeaching =
           category.includes('교직') ||
@@ -115,7 +153,7 @@ export default function EnrolledUploadModal({
           courseName.includes('교재연구');
 
         parsedCourses.push({
-          user_id: userId,
+          user_id: activeUserId,
           course_code: courseCode || null,
           course_name: courseName,
           category,
@@ -132,23 +170,41 @@ export default function EnrolledUploadModal({
         throw new Error('추출된 수강 과목이 0건입니다.');
       }
 
-      // 기존 수강 중 목록 교체 (이전 데이터 덮어쓰기)
-      await (supabase.from('user_enrolled_courses') as any)
+      // 3. 기존 수강 중 목록 교체 (이전 데이터 덮어쓰기)
+      const { error: deleteError } = await (supabase.from('user_enrolled_courses') as any)
         .delete()
-        .eq('user_id', userId);
+        .eq('user_id', activeUserId);
 
-      const { error: insertError } = await (
-        supabase.from('user_enrolled_courses') as any
-      ).insert(parsedCourses);
+      if (deleteError) {
+        throw new Error(`기존 수강목록 정리 실패: ${deleteError.message}`);
+      }
 
-      if (insertError) throw insertError;
+      const { error: insertError } = await (supabase.from('user_enrolled_courses') as any)
+        .insert(parsedCourses);
+
+      if (insertError) {
+        // Supabase 에러 객체 내부 세부 메시지 추출
+        const detailedMsg = insertError.message || insertError.details || insertError.hint || 'DB 등록 실패';
+        throw new Error(`수강과목 등록 오류: ${detailedMsg}`);
+      }
 
       alert(`정상 처리: 현재 수강 중인 ${parsedCourses.length}개 과목이 등록되었습니다.`);
       onSuccess();
       onClose();
     } catch (err: any) {
-      console.error('수강 엑셀 파싱/업로드 오류:', err);
-      setErrorMsg(err.message || '엑셀 파일을 처리하는 중 오류가 발생했습니다.');
+      console.error('수강 엑셀 파싱/업로드 오류 상세:', {
+        message: err?.message,
+        details: err?.details,
+        hint: err?.hint,
+        errorObj: err,
+      });
+
+      const messageToDisplay =
+        err?.message ||
+        err?.details ||
+        (typeof err === 'string' ? err : '엑셀 파일을 처리하는 중 오류가 발생했습니다.');
+
+      setErrorMsg(messageToDisplay);
     } finally {
       setIsProcessing(false);
     }

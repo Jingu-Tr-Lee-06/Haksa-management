@@ -1,17 +1,34 @@
+// src/app/page.tsx
 'use client';
 
 import { useEffect, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import { Database } from '@/types/database.types';
 
-type Profile = Database['public']['Tables']['profiles']['Row'];
+interface UserProfileData {
+  id: string;
+  name: string;
+  student_number: string;
+  primary_major: string;
+  major_track: 'SINGLE' | 'DOUBLE' | 'MINOR';
+  secondary_major: string | null;
+  admission_year: number;
+}
+
+function getValidString(...candidates: any[]): string {
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim().length > 0) {
+      return c.trim();
+    }
+  }
+  return '';
+}
 
 function QuickLoginForm({
   onLoginSuccess,
 }: {
-  onLoginSuccess: (profile: Profile) => void;
+  onLoginSuccess: (profile: UserProfileData) => void;
 }) {
   const router = useRouter();
   const supabase = createClient();
@@ -33,7 +50,7 @@ function QuickLoginForm({
 
       if (authError) {
         if (authError.message.includes('Email not confirmed')) {
-          throw new Error('이메일 인증이 완료되지 않았습니다. 메일함에서 확인 링크를 클릭하거나 관리자 승인을 받으십시오.');
+          throw new Error('이메일 인증이 완료되지 않았습니다. 메일함을 확인하거나 관리자에게 문의하십시오.');
         } else if (authError.message.includes('Invalid login credentials')) {
           throw new Error('이메일 또는 비밀번호가 일치하지 않습니다.');
         }
@@ -41,37 +58,68 @@ function QuickLoginForm({
       }
 
       if (authData.user) {
-        // profiles 조회 시도
-        const { data: profileData } = await supabase
+        // DB profiles 직접 조회
+        const { data: rawProfile } = await supabase
           .from('profiles')
           .select('*')
           .eq('id', authData.user.id)
           .maybeSingle();
 
-        if (profileData) {
-          onLoginSuccess(profileData as Profile);
-        } else {
-          // profiles 레코드가 누락된 경우 auth 메타데이터로 임시 생성 및 fallback
-          const meta = authData.user.user_metadata || {};
-          const fallbackProfile = {
-            id: authData.user.id,
-            name: meta.name || '학생',
-            student_number: meta.student_number || '',
-            primary_major: meta.primary_major || '컴퓨터교육과',
-            track: meta.track || 'DOUBLE_MAJOR',
-            double_major: meta.double_major || '기술가정교육과',
-            admission_year: meta.admission_year || 2025,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          } as Profile;
+        const profileData = (rawProfile || {}) as Record<string, any>;
+        const meta = (authData.user.user_metadata || {}) as Record<string, any>;
 
-          await (supabase.from('profiles') as any).upsert(fallbackProfile);
-          onLoginSuccess(fallbackProfile);
-        }
+        // DB track 컬럼 우선 판정
+        const rawTrack = String(
+          profileData.track ||
+          profileData.major_track ||
+          meta.major_track ||
+          meta.track ||
+          'SINGLE'
+        ).toUpperCase();
+
+        const resolvedTrack: 'SINGLE' | 'DOUBLE' | 'MINOR' = rawTrack.includes('DOUBLE')
+          ? 'DOUBLE'
+          : rawTrack.includes('MINOR')
+          ? 'MINOR'
+          : 'SINGLE';
+
+        const secMajor =
+          profileData.secondary_major ||
+          profileData.double_major ||
+          profileData.minor_major ||
+          meta.secondary_major ||
+          meta.double_major ||
+          meta.minor_major ||
+          null;
+
+        const resolvedName =
+          getValidString(
+            profileData.name,
+            profileData.full_name,
+            meta.full_name,
+            meta.name
+          ) || authData.user.email?.split('@')[0] || '사용자';
+
+        const unifiedProfile: UserProfileData = {
+          id: authData.user.id,
+          name: resolvedName,
+          student_number:
+            getValidString(
+              profileData.student_number,
+              profileData.student_id,
+              meta.student_id,
+              meta.student_number
+            ) || '202500000',
+          primary_major:
+            getValidString(profileData.primary_major, meta.primary_major) || '컴퓨터교육과',
+          major_track: resolvedTrack,
+          secondary_major: secMajor,
+          admission_year: profileData.admission_year || meta.admission_year || 2025,
+        };
+
+        onLoginSuccess(unifiedProfile);
+        router.refresh();
       }
-
-      // 화면 상태 즉시 반영
-      window.location.reload();
     } catch (err) {
       console.error('로그인 에러:', err);
       setErrorMessage(
@@ -150,7 +198,8 @@ function QuickLoginForm({
 }
 
 export default function HomePage() {
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const router = useRouter();
+  const [profile, setProfile] = useState<UserProfileData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const supabase = createClient();
 
@@ -162,27 +211,63 @@ export default function HomePage() {
         } = await supabase.auth.getUser();
 
         if (user) {
-          const { data } = await supabase
+          const { data: rawProfile } = await supabase
             .from('profiles')
             .select('*')
             .eq('id', user.id)
             .maybeSingle();
 
-          if (data) {
-            setProfile(data as Profile);
-          } else {
-            // profiles 테이블 조회가 비었을 때 metadata로 임시 표시
-            const meta = user.user_metadata || {};
-            setProfile({
-              id: user.id,
-              name: meta.name || '학생',
-              student_number: meta.student_number || '',
-              primary_major: meta.primary_major || '컴퓨터교육과',
-              track: meta.track || 'DOUBLE_MAJOR',
-              double_major: meta.double_major || '기술가정교육과',
-              admission_year: meta.admission_year || 2025,
-            } as Profile);
-          }
+          const profileData = (rawProfile || {}) as Record<string, any>;
+          const meta = (user.user_metadata || {}) as Record<string, any>;
+
+          // DB의 track 컬럼 값을 최우선 반영
+          const rawTrack = String(
+            profileData.track ||
+            profileData.major_track ||
+            meta.major_track ||
+            meta.track ||
+            'SINGLE'
+          ).toUpperCase();
+
+          const resolvedTrack: 'SINGLE' | 'DOUBLE' | 'MINOR' = rawTrack.includes('DOUBLE')
+            ? 'DOUBLE'
+            : rawTrack.includes('MINOR')
+            ? 'MINOR'
+            : 'SINGLE';
+
+          const secMajor =
+            profileData.secondary_major ||
+            profileData.double_major ||
+            profileData.minor_major ||
+            meta.secondary_major ||
+            meta.double_major ||
+            meta.minor_major ||
+            null;
+
+          const resolvedName =
+            getValidString(
+              profileData.name,
+              profileData.full_name,
+              meta.full_name,
+              meta.name
+            ) || user.email?.split('@')[0] || '사용자';
+
+          setProfile({
+            id: user.id,
+            name: resolvedName,
+            student_number:
+              getValidString(
+                profileData.student_number,
+                profileData.student_id,
+                meta.student_id,
+                meta.student_number
+              ) || '202500000',
+            primary_major:
+              getValidString(profileData.primary_major, meta.primary_major) || '컴퓨터교육과',
+            major_track: resolvedTrack,
+            secondary_major: secMajor,
+            admission_year: profileData.admission_year || meta.admission_year || 2025,
+          });
         }
       } catch (err) {
         console.error('사용자 데이터 로드 실패:', err);
@@ -197,8 +282,16 @@ export default function HomePage() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setProfile(null);
-    window.location.reload();
+    router.refresh();
   };
+
+  const trackLabel = profile?.major_track === 'DOUBLE'
+    ? `복수전공 (${profile.secondary_major || '제2전공'})`
+    : profile?.major_track === 'MINOR'
+    ? `부전공 (${profile.secondary_major || '제2전공'})`
+    : '단일전공 (심화)';
+
+  const targetCredits = profile?.major_track === 'DOUBLE' ? '144학점 이상' : '140학점 이상';
 
   return (
     <div className="relative min-h-[calc(100vh-140px)] overflow-hidden bg-gradient-to-b from-slate-50 via-white to-slate-50">
@@ -208,7 +301,6 @@ export default function HomePage() {
       {/* 히어로 섹션 */}
       <section className="relative mx-auto max-w-7xl px-4 pt-12 pb-16 sm:px-6 lg:px-8 lg:pt-16 lg:pb-24">
         <div className="grid grid-cols-1 items-center gap-12 lg:grid-cols-12 lg:gap-8">
-          {/* 좌측 슬로건 및 지표 영역 */}
           <div className="lg:col-span-7">
             <div className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white/80 px-3.5 py-1.5 text-[11px] font-semibold text-slate-700 shadow-sm backdrop-blur">
               <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -224,25 +316,25 @@ export default function HomePage() {
             </h1>
 
             <p className="mt-5 max-w-2xl text-sm leading-relaxed text-slate-600 sm:text-base">
-              컴퓨터교육과 단일심화(140학점), 사범계 복수전공(144학점 이상, 기술·가정 등), 부전공(140학점 체계)
-              교육과정에 따른 기본이수 7개 분야, 교과교육 8학점, 법정 교직 22학점 및 무시험검정 6대 지표를 완벽 판정합니다.
+              컴퓨터교육과 단일심화(140학점), 사범계 복수전공(144학점 이상), 부전공(140학점 체계)
+              교육과정에 따른 전공필수 21학점(7과목), 교과교육 8학점, 법정 교직 24학점 및 캡스톤디자인Ⅱ 졸업요건을 완벽 판정합니다.
             </p>
 
             <div className="mt-8 grid grid-cols-3 gap-4 border-t border-slate-200 pt-6">
               <div>
                 <p className="text-[11px] font-medium text-slate-500">졸업 기준 학점</p>
                 <p className="mt-1 text-2xl font-black text-slate-900 sm:text-3xl">140 / 144</p>
-                <p className="text-[10px] text-slate-400">단일·부전공 / 복수전공</p>
+                <p className="text-[10px] text-slate-400">단일·부전공(140) / 복수(144)</p>
               </div>
               <div>
                 <p className="text-[11px] font-medium text-slate-500">법정 교직 이수</p>
-                <p className="mt-1 text-2xl font-black text-slate-900 sm:text-3xl">22학점</p>
-                <p className="text-[10px] text-slate-400">이론 12 · 소양 6 · 실습 4</p>
+                <p className="mt-1 text-2xl font-black text-slate-900 sm:text-3xl">24학점</p>
+                <p className="text-[10px] text-slate-400">이론 12 · 소양 8 · 실습 4</p>
               </div>
               <div>
-                <p className="text-[11px] font-medium text-slate-500">무시험검정 지표</p>
-                <p className="mt-1 text-2xl font-black text-slate-900 sm:text-3xl">6종 충족</p>
-                <p className="text-[10px] text-slate-400">인적성·CPR·성인지·봉사 등</p>
+                <p className="text-[11px] font-medium text-slate-500">학과 필수 요건</p>
+                <p className="mt-1 text-2xl font-black text-slate-900 sm:text-3xl">캡스톤Ⅱ</p>
+                <p className="text-[10px] text-slate-400">졸업논문 대체 교과목</p>
               </div>
             </div>
 
@@ -262,73 +354,78 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* 우측 로그인 / 프로필 카드 */}
-          <div className="lg:col-span-5">
-            {!isLoading && (
-              <>
-                {profile ? (
-                  <div className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xl sm:p-8">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600">
-                      AUTHENTICATED STUDENT
-                    </span>
-                    <h2 className="mt-1 text-xl font-bold tracking-tight text-slate-900">
-                      {profile.name} 학생
-                    </h2>
-                    <p className="text-xs text-slate-500">
-                      학번: {profile.student_number || '학번 미지정'} | {profile.admission_year}년도 입학
-                    </p>
+          {/* 우측 로그인 폼 / 프로필 카드 */}
+          <div className="lg:col-span-5 min-h-[380px] flex items-center">
+            {isLoading ? (
+              <div className="w-full h-80 animate-pulse rounded-2xl border border-slate-200 bg-slate-50/70 p-6 flex flex-col justify-between">
+                <div className="space-y-3">
+                  <div className="h-4 w-28 bg-slate-200 rounded" />
+                  <div className="h-6 w-48 bg-slate-200 rounded" />
+                  <div className="h-3 w-64 bg-slate-200 rounded" />
+                </div>
+                <div className="space-y-3">
+                  <div className="h-10 w-full bg-slate-200 rounded-lg" />
+                  <div className="h-10 w-full bg-slate-200 rounded-lg" />
+                </div>
+                <div className="h-10 w-full bg-slate-300 rounded-lg" />
+              </div>
+            ) : profile ? (
+              <div className="w-full rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xl sm:p-8">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600">
+                  AUTHENTICATED STUDENT
+                </span>
+                <h2 className="mt-1 text-xl font-bold tracking-tight text-slate-900">
+                  {profile.name}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  학번: {profile.student_number || '학번 미지정'} | {profile.admission_year}년도 입학
+                </p>
 
-                    <div className="mt-5 space-y-2 rounded-xl bg-slate-50 p-4 text-xs">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">주전공</span>
-                        <span className="font-bold text-slate-900">{profile.primary_major}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">이수 트랙</span>
-                        <span className="font-bold text-slate-900">
-                          {profile.track === 'DOUBLE_MAJOR'
-                            ? `복수전공 (${profile.double_major || '복수전공'})`
-                            : (profile as any).track === 'MINOR'
-                            ? `부전공 (${(profile as any).minor_major || '부전공'})`
-                            : '단일전공 (심화)'}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">목표 졸업 학점</span>
-                        <span className="font-bold text-slate-900">
-                          {profile.track === 'DOUBLE_MAJOR' ? '144학점 이상' : '140학점 이상'}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="mt-6 grid grid-cols-2 gap-2 text-center text-xs">
-                      <Link
-                        href="/audit"
-                        className="rounded-lg bg-slate-900 py-2.5 font-bold text-white transition hover:bg-slate-800"
-                      >
-                        내 사정 리포트
-                      </Link>
-                      <Link
-                        href="/curriculum"
-                        className="rounded-lg border border-slate-300 bg-white py-2.5 font-semibold text-slate-700 hover:bg-slate-50"
-                      >
-                        성적 관리
-                      </Link>
-                    </div>
-
-                    <button
-                      onClick={handleLogout}
-                      className="mt-3 w-full py-2 text-center text-xs text-slate-400 hover:text-slate-600"
-                    >
-                      로그아웃
-                    </button>
+                <div className="mt-5 space-y-2 rounded-xl bg-slate-50 p-4 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">주전공</span>
+                    <span className="font-bold text-slate-900">{profile.primary_major}</span>
                   </div>
-                ) : (
-                  <Suspense fallback={<div className="h-80 w-full animate-pulse rounded-2xl bg-slate-100" />}>
-                    <QuickLoginForm onLoginSuccess={(p) => setProfile(p)} />
-                  </Suspense>
-                )}
-              </>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">이수 트랙</span>
+                    <span className="font-bold text-slate-900">
+                      {trackLabel}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">목표 졸업 학점</span>
+                    <span className="font-bold text-slate-900">
+                      {targetCredits}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-6 grid grid-cols-2 gap-2 text-center text-xs">
+                  <Link
+                    href="/audit"
+                    className="rounded-lg bg-slate-900 py-2.5 font-bold text-white transition hover:bg-slate-800"
+                  >
+                    내 사정 리포트
+                  </Link>
+                  <Link
+                    href="/simulator"
+                    className="rounded-lg border border-slate-300 bg-white py-2.5 font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    성적 관리
+                  </Link>
+                </div>
+
+                <button
+                  onClick={handleLogout}
+                  className="mt-3 w-full py-2 text-center text-xs text-slate-400 hover:text-slate-600"
+                >
+                  로그아웃
+                </button>
+              </div>
+            ) : (
+              <div className="w-full">
+                <QuickLoginForm onLoginSuccess={(p) => setProfile(p)} />
+              </div>
             )}
           </div>
         </div>
@@ -344,11 +441,12 @@ export default function HomePage() {
             사범대학 전공 이수 트랙별 졸업 및 교원자격 무시험검정 기준
           </h2>
           <p className="mt-1 text-xs text-slate-500">
-            단일심화전공, 타 사범계열 복수전공 및 부전공 이수 시 적용되는 법정 기준표입니다.
+            단일전공(심화), 사범계 복수전공 및 부전공 이수 시 적용되는 법정 기준표입니다.
           </p>
         </div>
 
         <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-3">
+          {/* 트랙 01: 단일전공 */}
           <div className="flex flex-col justify-between rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
             <div>
               <div className="inline-block rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-700">
@@ -364,15 +462,19 @@ export default function HomePage() {
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
                   <span className="text-slate-500">전공 이수 요건</span>
-                  <span className="font-bold text-slate-900">75학점 이상</span>
+                  <span className="font-bold text-slate-900">72학점 이상 (필수21+선택51)</span>
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
-                  <span className="text-slate-500">기본이수과목</span>
-                  <span className="font-semibold text-slate-800">7개 분야 (21학점)</span>
+                  <span className="text-slate-500">교양 이수 요건</span>
+                  <span className="font-semibold text-slate-800">36학점 (균형선택 12 이상)</span>
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
-                  <span className="text-slate-500">교과교육영역</span>
-                  <span className="font-semibold text-slate-800">3과목 (8학점)</span>
+                  <span className="text-slate-500">법정 교직과목</span>
+                  <span className="font-semibold text-slate-800">24학점 (이론12·소양8·실습4)</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-50 py-1">
+                  <span className="text-slate-500">학과 필수 요건</span>
+                  <span className="font-bold text-slate-900">캡스톤디자인Ⅱ 이수 필수</span>
                 </div>
                 <div className="flex justify-between py-1">
                   <span className="text-slate-500">취득 교원자격</span>
@@ -381,17 +483,18 @@ export default function HomePage() {
               </div>
             </div>
             <div className="mt-6 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
-              전공 평점 75점(2.01) 및 교직 80점(2.51) 충족 필수
+              균형교양은 3개 영역 이상 이수 필수
             </div>
           </div>
 
+          {/* 트랙 02: 복수전공 */}
           <div className="flex flex-col justify-between rounded-xl border-2 border-slate-800 bg-white p-6 shadow-sm">
             <div>
               <div className="inline-block rounded bg-slate-900 px-2 py-0.5 text-[10px] font-bold text-white">
                 트랙 02 (추천)
               </div>
               <h3 className="mt-2 text-lg font-bold text-slate-900">사범계 복수전공</h3>
-              <p className="mt-1 text-xs text-slate-500">기술·가정교육과 등 타 사범계열 병행</p>
+              <p className="mt-1 text-xs text-slate-500">타 사범계열 학과 병행 이수</p>
 
               <div className="mt-4 space-y-2 text-xs">
                 <div className="flex justify-between border-b border-slate-50 py-1">
@@ -400,15 +503,23 @@ export default function HomePage() {
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
                   <span className="text-slate-500">주전공 이수</span>
-                  <span className="font-bold text-slate-900">50학점 이상</span>
+                  <span className="font-bold text-slate-900">50학점 이상 (필수21+선택30)</span>
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
                   <span className="text-slate-500">복수전공 이수</span>
                   <span className="font-bold text-slate-900">50학점 이상</span>
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
-                  <span className="text-slate-500">교과교육영역</span>
-                  <span className="font-semibold text-slate-800">각 전공별 3과목(8학점)</span>
+                  <span className="text-slate-500">교양 이수 요건</span>
+                  <span className="font-semibold text-slate-800">18학점 (균형선택 8 이상 감면)</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-50 py-1">
+                  <span className="text-slate-500">법정 교직과목</span>
+                  <span className="font-semibold text-slate-800">24학점 (이론12·소양8·실습4)</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-50 py-1">
+                  <span className="text-slate-500">학과 필수 요건</span>
+                  <span className="font-bold text-slate-900">캡스톤디자인Ⅱ 이수 필수</span>
                 </div>
                 <div className="flex justify-between py-1">
                   <span className="text-slate-500">취득 교원자격</span>
@@ -417,10 +528,11 @@ export default function HomePage() {
               </div>
             </div>
             <div className="mt-6 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
-              두 전공 모두 기본이수 7개 분야 충족 및 교과교육 필수
+              양 전공 모두 기본이수 7개 분야 및 교과교육 8학점 필수 충족
             </div>
           </div>
 
+          {/* 트랙 03: 부전공 */}
           <div className="flex flex-col justify-between rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
             <div>
               <div className="inline-block rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-700">
@@ -436,15 +548,23 @@ export default function HomePage() {
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
                   <span className="text-slate-500">주전공 이수</span>
-                  <span className="font-bold text-slate-900">50학점 이상</span>
+                  <span className="font-bold text-slate-900">51학점 이상 (필수21+선택30)</span>
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
                   <span className="text-slate-500">부전공 과목 이수</span>
-                  <span className="font-bold text-slate-900">21학점 이상</span>
+                  <span className="font-bold text-slate-900">21학점 이상 (기본이수 15 포함)</span>
                 </div>
                 <div className="flex justify-between border-b border-slate-50 py-1">
-                  <span className="text-slate-500">기본이수과목</span>
-                  <span className="font-semibold text-slate-800">부전공 분야 15학점 이상</span>
+                  <span className="text-slate-500">교양 이수 요건</span>
+                  <span className="font-semibold text-slate-800">36학점 (균형선택 12 이상)</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-50 py-1">
+                  <span className="text-slate-500">법정 교직과목</span>
+                  <span className="font-semibold text-slate-800">24학점 (이론12·소양8·실습4)</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-50 py-1">
+                  <span className="text-slate-500">학과 필수 요건</span>
+                  <span className="font-bold text-slate-900">캡스톤디자인Ⅱ 이수 필수</span>
                 </div>
                 <div className="flex justify-between py-1">
                   <span className="text-slate-500">취득 교원자격</span>
@@ -459,21 +579,9 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* 파트너 대학 바 */}
-      <section className="border-t border-slate-200 bg-white py-10">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <p className="text-center text-[11px] font-bold uppercase tracking-wider text-slate-400">
-            국립공주대학교 사범대학 학사 규정 및 교육 협력 체계
-          </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-8 text-xs font-semibold text-slate-500 opacity-80 sm:gap-14">
-            <span className="hover:text-slate-900">국립공주대학교 사범대학</span>
-            <span className="hover:text-slate-900">컴퓨터교육과</span>
-            <span className="hover:text-slate-900">기술·가정교육과</span>
-            <span className="hover:text-slate-900">교원양성지원센터</span>
-            <span className="hover:text-slate-900">사범대학 교직부</span>
-          </div>
-        </div>
-      </section>
+    
+
+      {/* Footer */}
     </div>
   );
 }
